@@ -34,7 +34,7 @@ except Exception:
 TZ = ZoneInfo("America/Sao_Paulo")
 
 # URL OFICIAL NO RENDER
-RENDER_BASE_URL = "https://agendamentos-doy4.onrender.com/"
+RENDER_BASE_URL = "https://agendassalo.onrender.com"
 
 def gerar_hash(password: str) -> str:
     """Gera o hash da senha compatível com o padrão do projeto."""
