@@ -25,8 +25,12 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-# --- CONFIGURAÇÃO DE SEGURANÇA E HORÁRIO ---
-SALT = st.secrets.get("SECURITY_SALT", "salao_fio_caixa_secure_default_2026")
+# --- CONFIGURAÇÃO DE SEGURANÇA E HORÁRIO (CORRIGIDO PARA O RENDER) ---
+try:
+    SALT = st.secrets.get("SECURITY_SALT", "salao_fio_caixa_secure_default_2026")
+except Exception:
+    SALT = os.getenv("SECURITY_SALT", "salao_fio_caixa_secure_default_2026")
+
 TZ = ZoneInfo("America/Sao_Paulo")
 
 # URL OFICIAL NO RENDER
@@ -287,11 +291,18 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CONEXÃO BANCO DE DADOS ---
-if "DB_URL" in st.secrets:
-    DB_URL = st.secrets["DB_URL"]
-else:
-    st.error("❌ ERRO CRÍTICO: Variável 'DB_URL' não encontrada nos Secrets.")
+# --- CONEXÃO BANCO DE DADOS (CORRIGIDO PARA O RENDER) ---
+DB_URL = os.getenv("DB_URL")
+
+if not DB_URL:
+    try:
+        if "DB_URL" in st.secrets:
+            DB_URL = st.secrets["DB_URL"]
+    except Exception:
+        pass
+
+if not DB_URL:
+    st.error("❌ ERRO CRÍTICO: Variável 'DB_URL' não encontrada nas Variáveis de Ambiente do Render nem nos Secrets.")
     st.stop()
 
 @st.cache_resource
@@ -528,8 +539,12 @@ def deletar_agendamento(id_agendamento):
     limpar_cache_sessao()
 
 def enviar_alerta_servidor_whatsapp(numero_salao, texto_mensagem):
-    wa_api_url = st.secrets.get("WA_API_URL", "")
-    wa_api_token = st.secrets.get("WA_API_TOKEN", "")
+    try:
+        wa_api_url = st.secrets.get("WA_API_URL", "")
+        wa_api_token = st.secrets.get("WA_API_TOKEN", "")
+    except Exception:
+        wa_api_url = os.getenv("WA_API_URL", "")
+        wa_api_token = os.getenv("WA_API_TOKEN", "")
     
     if wa_api_url and wa_api_token and numero_salao:
         try:
@@ -642,7 +657,11 @@ def renderizar_botao_download_apk(dados_bytes, nome_arquivo, mime_type, label_bo
 
 def renderizar_whatsapp_flutuante():
     wa_msg = urllib.parse.quote("Olá! Preciso de suporte ou tenho dúvidas sobre o sistema de gestão do Salão.")
-    support_phone = st.secrets.get("SUPPORT_PHONE", "5537991598179")
+    try:
+        support_phone = st.secrets.get("SUPPORT_PHONE", "5537991598179")
+    except Exception:
+        support_phone = os.getenv("SUPPORT_PHONE", "5537991598179")
+        
     st.markdown(f"""
         <style>
         .floating-wa {{ position: fixed; width: 55px; height: 55px; bottom: 30px; right: 30px; background: linear-gradient(135deg, #25d366 0%, #128c7e 100%); border-radius: 50px; text-align: center; box-shadow: 0px 8px 25px rgba(37,211,102,0.4); z-index: 9999999; display: flex; align-items: center; justify-content: center; text-decoration: none; transition: all 0.3s ease; }}
@@ -890,7 +909,11 @@ if not st.session_state.autenticado:
 
         st.markdown("<hr style='border-color: rgba(244,114,182,0.2); margin: 20px 0;'>", unsafe_allow_html=True)
 
-        support_phone = st.secrets.get("SUPPORT_PHONE", "5537991598179")
+        try:
+            support_phone = st.secrets.get("SUPPORT_PHONE", "5537991598179")
+        except Exception:
+            support_phone = os.getenv("SUPPORT_PHONE", "5537991598179")
+
         col_esqueci, col_whats = st.columns(2)
         with col_esqueci:
             if st.button("Esqueci minha senha", use_container_width=True):
