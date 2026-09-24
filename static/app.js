@@ -4,102 +4,84 @@ function todayISO(){return new Date().toLocaleDateString('en-CA',{timeZone:'Amer
 function toast(msg,type='success'){const d=document.createElement('div');d.className='toast '+type;d.textContent=msg;document.body.appendChild(d);setTimeout(()=>d.remove(),3200)}
 function csrf(){return document.querySelector('meta[name="csrf-token"]')?.content||''}
 async function api(url,opt={}){const headers={'Content-Type':'application/json','X-CSRFToken':csrf(),...(opt.headers||{})};const r=await fetch(url,{...opt,headers});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'Erro na operação');return j}
+function switchTab(tab){const b=document.querySelector(`.tabs button[data-tab="${tab}"]`);if(b)b.click()}
 
-document.addEventListener('DOMContentLoaded',()=>{
- document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(x=>x.classList.remove('active'));b.classList.add('active');qs('#'+b.dataset.tab)?.classList.add('active');localStorage.setItem('fio_tab',b.dataset.tab)})
- const saved=localStorage.getItem('fio_tab'); if(saved) document.querySelector(`.tabs button[data-tab="${saved}"]`)?.click()
- document.querySelectorAll('.segmented button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.segmented button').forEach(x=>x.classList.remove('active'));b.classList.add('active');if(qs('#tipo'))qs('#tipo').value=b.dataset.mode;qs('#adminSecond')?.classList.toggle('hidden',b.dataset.mode!=='admin')})
- ['saleDate','expenseDate','creditDate','aDate'].forEach(id=>{const e=qs('#'+id);if(e)e.value=todayISO()})
- const sale=qs('#saleService'); if(sale){sale.onchange=()=>qs('#salePrice').value=sale.selectedOptions[0].dataset.price;sale.dispatchEvent(new Event('change'))}
- const credit=qs('#creditService'); if(credit){credit.onchange=()=>qs('#creditValue').value=credit.selectedOptions[0].dataset.price;credit.dispatchEvent(new Event('change'))}
- setupAppointmentForm()
- setupAppointmentFilters()
- setupProfessionalCalendar()
- const paySelect=qs('#payCreditSelect'); if(paySelect){paySelect.addEventListener('change',updatePayCreditInfo); updatePayCreditInfo()}
-})
+let editingService='__new__';
+let calendarDate=new Date();
+let calendarView='month';
+let calendarRows=[];
+let selectedDate=window.APP?.today||todayISO();
+let appointmentFilter='all';
+
+function isoDate(d){return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10)}
+function parseISO(s){const [y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d)}
+function startOfWeek(d){const x=new Date(d);const day=x.getDay()||7;x.setDate(x.getDate()-day+1);x.setHours(0,0,0,0);return x}
+function endOfMonth(d){return new Date(d.getFullYear(),d.getMonth()+1,0)}
+function addDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x}
+function fmtDate(s){const d=parseISO(s);return d.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'})}
+function fmtLong(s){const d=parseISO(s);return d.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long'})}
+function escapeHtml(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 
 function openModal(id){qs('#'+id)?.classList.add('show')}
 function closeModal(id){qs('#'+id)?.classList.remove('show')}
 
-async function saveGoal(){try{const goal=Number(qs('#goalInput').value);if(goal<0)throw Error('Meta inválida');await api('/api/goal',{method:'POST',body:JSON.stringify({goal})});toast('Meta salva!');location.reload()}catch(e){toast(e.message,'error')}}
+function initDates(){['saleDate','expenseDate','creditDate','aDate'].forEach(id=>{const e=qs('#'+id);if(e)e.value=todayISO()})}
 
+document.addEventListener('DOMContentLoaded',()=>{
+ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(x=>x.classList.remove('active'));b.classList.add('active');qs('#'+b.dataset.tab)?.classList.add('active');localStorage.setItem('fio_tab',b.dataset.tab);if(b.dataset.tab==='appointments')loadCalendar()})
+ const saved=localStorage.getItem('fio_tab');if(saved&&document.querySelector(`.tabs button[data-tab="${saved}"]`))switchTab(saved)
+ initDates()
+ const sale=qs('#saleService');if(sale){sale.onchange=()=>qs('#salePrice').value=sale.selectedOptions[0].dataset.price;sale.dispatchEvent(new Event('change'))}
+ const credit=qs('#creditService');if(credit){credit.onchange=()=>qs('#creditValue').value=credit.selectedOptions[0].dataset.price;credit.dispatchEvent(new Event('change'))}
+ const paySelect=qs('#payCreditSelect');if(paySelect){paySelect.addEventListener('change',updatePayCreditInfo);updatePayCreditInfo()}
+ setupAppointmentForm();setupAppointmentFilters();setupCalendarViews();setupBooking();
+ if(qs('#calendarGrid'))loadCalendar();
+})
+
+async function saveGoal(){try{const goal=Number(qs('#goalInput').value);if(goal<0)throw Error('Meta inválida');await api('/api/goal',{method:'POST',body:JSON.stringify({goal})});toast('Meta salva!');location.reload()}catch(e){toast(e.message,'error')}}
 async function saveSale(){try{const v=Number(qs('#salePrice').value);if(v<0)throw Error('Informe um valor válido');await api('/api/flow',{method:'POST',body:JSON.stringify({tipo:'Entrada',descricao:'Atendimento: '+qs('#saleService').value,valor:v,data:qs('#saleDate').value})});toast('Atendimento registrado!');location.reload()}catch(e){toast(e.message,'error')}}
 async function saveExpense(){try{const v=Number(qs('#expenseValue').value);const desc=qs('#expenseDesc').value.trim();if(v<=0||!desc)throw Error('Informe descrição e valor válidos');await api('/api/flow',{method:'POST',body:JSON.stringify({tipo:'Saída',descricao:desc,valor:-v,data:qs('#expenseDate').value})});toast('Despesa lançada!');location.reload()}catch(e){toast(e.message,'error')}}
 async function saveCredit(){try{const name=qs('#creditName').value.trim();const v=Number(qs('#creditValue').value);if(!name||v<=0)throw Error('Informe cliente e valor');await api('/api/flow',{method:'POST',body:JSON.stringify({tipo:'Pendência',descricao:'Fiado de: '+name+' ('+qs('#creditService').value+')',valor:v,data:qs('#creditDate').value})});toast('Fiado registrado!');location.reload()}catch(e){toast(e.message,'error')}}
 async function deleteFlow(id){if(!confirm('Excluir esta movimentação?'))return;try{await api('/api/flow?id='+id,{method:'DELETE'});location.reload()}catch(e){toast(e.message,'error')}}
 async function payCredit(id){if(!confirm('Baixar este fiado como recebido?'))return;try{await api('/api/flow/'+id+'/pay',{method:'POST'});toast('Fiado baixado!');location.reload()}catch(e){toast(e.message,'error')}}
 
-async function appointmentAction(id,action){
- const labels={confirm:'Confirmar este agendamento?',cancel:'Cancelar este agendamento?',complete:'Registrar atendimento e receber R$ do cliente?',fiado:'Concluir atendimento como fiado?'};
+function appointmentAction(id,action){
+ const labels={confirm:'Confirmar este agendamento?',cancel:'Cancelar este agendamento?',complete:'Registrar atendimento e receber o valor?',fiado:'Concluir atendimento como fiado?'};
  if(!confirm(labels[action]||'Confirmar ação?'))return;
- try{const r=await api('/api/appointments/'+id,{method:'POST',body:JSON.stringify({action})});
-  const msg=action==='confirm'?'Agendamento confirmado!':action==='complete'?'Atendimento concluído e lançado no caixa!':action==='fiado'?'Atendimento concluído como fiado!':'Agendamento cancelado!';
-  toast(msg);setTimeout(()=>location.reload(),350);
- }catch(e){toast(e.message,'error')}
+ api('/api/appointments/'+id,{method:'POST',body:JSON.stringify({action})}).then(()=>{toast(action==='confirm'?'Agendamento confirmado!':action==='complete'?'Atendimento concluído e lançado no caixa!':action==='fiado'?'Atendimento concluído como fiado!':'Agendamento cancelado!');loadCalendar()}).catch(e=>toast(e.message,'error'))
 }
 
-
-let editingService='__new__';
-function editService(oldName,price){editingService=oldName;qs('#serviceEditorTitle').textContent=oldName==='__new__'?'Adicionar serviço':'Editar serviço';qs('#serviceName').value=oldName==='__new__'?'':oldName;qs('#servicePrice').value=oldName==='__new__'?'':price;qs('#serviceName').focus()}
-async function saveService(){try{const name=qs('#serviceName').value.trim(),price=Number(qs('#servicePrice').value);if(!name||price<0)throw Error('Informe nome e preço válidos');await api('/api/services',{method:'POST',body:JSON.stringify({old:editingService,name,price})});toast('Serviço salvo!');location.reload()}catch(e){toast(e.message,'error')}}
+function editService(oldName,details){editingService=oldName;qs('#serviceEditorTitle').textContent=oldName==='__new__'?'Adicionar serviço':'Editar serviço';qs('#serviceName').value=oldName==='__new__'?'':oldName;qs('#servicePrice').value=oldName==='__new__'?'':details.preco;qs('#serviceCategory').value=oldName==='__new__'?'Geral':(details.categoria||'Geral');qs('#serviceDuration').value=oldName==='__new__'?'60':String(details.duracao||60);qs('#serviceName').focus()}
+async function saveService(){try{const name=qs('#serviceName').value.trim(),price=Number(qs('#servicePrice').value),category=qs('#serviceCategory').value,duration=Number(qs('#serviceDuration').value);if(!name||price<0)throw Error('Informe nome e preço válidos');await api('/api/services',{method:'POST',body:JSON.stringify({old:editingService,name,price,category,duration})});toast('Serviço salvo!');location.reload()}catch(e){toast(e.message,'error')}}
 function deleteService(name){if(!confirm('Excluir '+name+'?'))return;api('/api/services?name='+encodeURIComponent(name),{method:'DELETE'}).then(()=>location.reload()).catch(e=>toast(e.message,'error'))}
 
 function openPayModal(){const modal=qs('#payCreditModal');if(!modal)return;openModal('payCreditModal');updatePayCreditInfo()}
-function updatePayCreditInfo(){const s=qs('#payCreditSelect'),info=qs('#payCreditInfo');if(!s||!info)return;const v=Number(s.selectedOptions[0]?.dataset.value||0);info.textContent='Valor a receber: R$ '+money(v);}
-async function paySelectedCredit(){const s=qs('#payCreditSelect');if(!s||!s.value)return toast('Selecione um fiado.','error');const id=Number(s.value);if(!confirm('Confirmar recebimento deste fiado?'))return;try{await api('/api/flow/'+id+'/pay',{method:'POST'});toast('Fiado marcado como pago!');closeModal('payCreditModal');location.reload()}catch(e){toast(e.message,'error')}}
+function updatePayCreditInfo(){const s=qs('#payCreditSelect'),info=qs('#payCreditInfo');if(!s||!info)return;const v=Number(s.selectedOptions[0]?.dataset.value||0);info.textContent='Valor a receber: R$ '+money(v)}
+async function paySelectedCredit(){const s=qs('#payCreditSelect');if(!s||!s.value)return toast('Selecione um fiado.','error');if(!confirm('Confirmar recebimento deste fiado?'))return;try{await api('/api/flow/'+Number(s.value)+'/pay',{method:'POST'});toast('Fiado marcado como pago!');closeModal('payCreditModal');location.reload()}catch(e){toast(e.message,'error')}}
 
 async function createMonthly(){try{if(!qs('#mName').value.trim())throw Error('Informe o nome');await api('/api/monthly',{method:'POST',body:JSON.stringify({action:'create',name:qs('#mName').value,phone:qs('#mPhone').value})});location.reload()}catch(e){toast(e.message,'error')}}
 async function addMonthlyService(){try{const price=Number(qs('#mPrice').value),qty=Number(qs('#mQty').value);if(price<0||qty<1)throw Error('Dados inválidos');await api('/api/monthly',{method:'POST',body:JSON.stringify({action:'service',id:Number(qs('#mClient').value),qty,price})});location.reload()}catch(e){toast(e.message,'error')}}
 async function payMonthly(id,max){const v=prompt('Valor a receber (máx. R$ '+money(max)+'):',max);if(v===null)return;const n=Number(v);if(n<=0||n>max)return toast('Valor inválido','error');try{await api('/api/monthly',{method:'POST',body:JSON.stringify({action:'pay',id,value:n})});location.reload()}catch(e){toast(e.message,'error')}}
 
 function copyBooking(){const e=qs('#bookingLink');navigator.clipboard.writeText(e.value).then(()=>toast('Link copiado!')).catch(()=>{e.select();document.execCommand('copy');toast('Link copiado!')})}
-async function shareBooking(){const url=qs('#bookingLink')?.value||window.APP?.bookingLink;if(navigator.share){try{await navigator.share({title:'Agendamento',text:'Agende seu horário online:',url})}catch(e){}}else{copyBooking()}}
+async function shareBooking(){const url=qs('#bookingLink')?.value||window.APP?.bookingLink;if(navigator.share){try{await navigator.share({title:'Agendamento',text:'Agende seu horário online:',url})}catch(e){}}else copyBooking()}
 
-function setupBooking(salao){const d=qs('#bookingDate'),h=qs('#bookingHour'),btn=qs('#bookingSubmit');if(!d)return;async function load(){if(!d.value)return;h.innerHTML='<option>Carregando...</option>';if(btn)btn.disabled=true;try{const r=await fetch('/api/booking/slots?salao='+encodeURIComponent(salao)+'&date='+d.value);const slots=await r.json();h.innerHTML=slots.length?'<option value="">Selecione</option>'+slots.map(x=>`<option value="${x}">${x}</option>`).join(''):'<option value="">Sem horários disponíveis</option>'}catch{h.innerHTML='<option value="">Erro ao carregar</option>'}finally{if(btn)btn.disabled=false}}d.addEventListener('change',load);if(d.value)load()}
+function setupBooking(){const d=qs('#bookingDate'),h=qs('#bookingHour'),btn=qs('#bookingSubmit'),service=qs('#bookingService');if(!d||!h)return;async function load(){if(!d.value||!service?.value)return;h.innerHTML='<option>Carregando...</option>';if(btn)btn.disabled=true;try{const r=await fetch('/api/booking/slots?salao='+encodeURIComponent(new URLSearchParams(location.search).get('salao')||'')+'&date='+d.value+'&service='+encodeURIComponent(service.value));const slots=await r.json();h.innerHTML=slots.length?'<option value="">Selecione</option>'+slots.map(x=>`<option value="${x}">${x}</option>`).join(''):'<option value="">Sem horários disponíveis</option>'}catch{h.innerHTML='<option value="">Erro ao carregar</option>'}finally{if(btn)btn.disabled=false}}function info(){const dta=window.APP?.serviceDetails?.[service?.value];const box=qs('#bookingServiceInfo');if(dta&&box)box.innerHTML=`<span>⏱️ ${dta.duracao} min</span><span>💵 R$ ${money(dta.preco)}</span><span>🌸 ${escapeHtml(dta.categoria)}</span>`}service?.addEventListener('change',()=>{info();load()});d.addEventListener('change',load);info();if(d.value)load()}
 
-function setupAppointmentForm(){const d=qs('#aDate'),h=qs('#aHour');if(!d||!h)return;async function load(){if(!d.value)return;h.innerHTML='<option>Carregando...</option>';try{const r=await fetch('/api/booking/slots?salao='+encodeURIComponent(window.APP?.user||'')+'&date='+d.value);const slots=await r.json();h.innerHTML=slots.length?'<option value="">Selecione</option>'+slots.map(x=>`<option value="${x}">${x}</option>`).join(''):'<option value="">Sem horários</option>'}catch{h.innerHTML='<option value="">Erro</option>'}}d.addEventListener('change',load)}
+function setupAppointmentForm(){const d=qs('#aDate'),h=qs('#aHour'),service=qs('#aService');if(!d||!h)return;async function load(){if(!d.value||!service?.value)return;h.innerHTML='<option>Carregando...</option>';try{const r=await fetch('/api/booking/slots?salao='+encodeURIComponent(window.APP?.user||'')+'&date='+d.value+'&service='+encodeURIComponent(service.value));const slots=await r.json();h.innerHTML=slots.length?'<option value="">Selecione</option>'+slots.map(x=>`<option value="${x}">${x}</option>`).join(''):'<option value="">Sem horários</option>'}catch{h.innerHTML='<option value="">Erro</option>'}}function info(){const dta=window.APP?.serviceDetails?.[service?.value],box=qs('#aDurationHelp');if(dta&&box)box.textContent=`⏱️ Este atendimento ocupa ${dta.duracao} minutos.`}d.addEventListener('change',load);service?.addEventListener('change',()=>{info();load()});info();if(d.value)load()}
+async function createAppointment(){try{const data={nome:qs('#aName').value.trim(),telefone:qs('#aPhone').value,servico:qs('#aService').value,data:qs('#aDate').value,hora:qs('#aHour').value};if(!data.nome||!data.data||!data.hora)throw Error('Preencha os dados do agendamento');await api('/api/appointments',{method:'POST',body:JSON.stringify(data)});toast('Agendamento criado!');closeModal('appointmentModal');loadCalendar()}catch(e){toast(e.message,'error')}}
 
-async function createAppointment(){try{const data={nome:qs('#aName').value.trim(),telefone:qs('#aPhone').value,servico:qs('#aService').value,data:qs('#aDate').value,hora:qs('#aHour').value};if(!data.nome||!data.data||!data.hora)throw Error('Preencha os dados do agendamento');await api('/api/appointments',{method:'POST',body:JSON.stringify(data)});toast('Agendamento criado!');closeModal('appointmentModal');location.reload()}catch(e){toast(e.message,'error')}}
+function setupAppointmentFilters(){document.querySelectorAll('[data-appt-filter]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-appt-filter]').forEach(x=>x.classList.remove('active'));b.classList.add('active');appointmentFilter=b.dataset.apptFilter;renderAppointmentList()})}
+function setupCalendarViews(){document.querySelectorAll('[data-calendar-view]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-calendar-view]').forEach(x=>x.classList.remove('active'));b.classList.add('active');calendarView=b.dataset.calendarView;renderCalendar()})}
+function calendarToday(){calendarDate=parseISO(selectedDate);loadCalendar()}
+function changeCalendar(delta){if(calendarView==='month')calendarDate.setMonth(calendarDate.getMonth()+delta);else if(calendarView==='week')calendarDate=addDays(calendarDate,delta*7);else calendarDate=addDays(calendarDate,delta);loadCalendar()}
+function periodRange(){if(calendarView==='month'){const first=new Date(calendarDate.getFullYear(),calendarDate.getMonth(),1);const start=startOfWeek(first);const last=endOfMonth(calendarDate);const end=addDays(startOfWeek(addDays(last,1)),6);return [isoDate(start),isoDate(end)]}if(calendarView==='week'){const s=startOfWeek(calendarDate);return [isoDate(s),isoDate(addDays(s,6))]}return [isoDate(calendarDate),isoDate(calendarDate)]}
+async function loadCalendar(){const grid=qs('#calendarGrid');if(!grid)return;grid.innerHTML='<div class="empty calendar-loading">Carregando agenda...</div>';const [start,end]=periodRange();try{const r=await fetch(`/api/agenda?start=${start}&end=${end}`);calendarRows=await r.json();renderCalendar();renderAppointmentList()}catch(e){grid.innerHTML='<div class="empty">Não foi possível carregar a agenda.</div>'}}
+function countFor(date){return calendarRows.filter(a=>a.data===date&&a.status!=='Cancelado').length}
+function renderCalendar(){const grid=qs('#calendarGrid'),week=qs('#calendarWeek'),title=qs('#calendarTitle'),sub=qs('#calendarSubtitle');if(!grid)return;const today=window.APP?.today||todayISO();grid.className='calendar-grid view-'+calendarView;week.style.display=calendarView==='day'?'none':'grid';if(calendarView==='month'){title.textContent=calendarDate.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});sub.textContent='Visão mensal';const first=new Date(calendarDate.getFullYear(),calendarDate.getMonth(),1),start=startOfWeek(first),last=endOfMonth(calendarDate);const end=addDays(startOfWeek(addDays(last,1)),6);let html='';for(let d=new Date(start);d<=end;d=addDays(d,1)){const iso=isoDate(d),muted=d.getMonth()!==calendarDate.getMonth(),count=countFor(iso);html+=`<button class="calendar-day ${muted?'muted ':''}${iso===today?'today ':''}${iso===selectedDate?'selected ':''}" onclick="selectCalendarDate('${iso}')"><span class="day-number">${d.getDate()}</span>${count?`<span class="day-count">${count}</span>`:''}</button>`}grid.innerHTML=html}else if(calendarView==='week'){const s=startOfWeek(calendarDate);title.textContent=`Semana de ${s.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})}`;sub.textContent=addDays(s,6).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'});let html='';for(let i=0;i<7;i++){const d=addDays(s,i),iso=isoDate(d),count=countFor(iso);html+=`<button class="week-day ${iso===today?'today ':''}${iso===selectedDate?'selected ':''}" onclick="selectCalendarDate('${iso}')"><b>${d.toLocaleDateString('pt-BR',{weekday:'short'}).replace('.','').toUpperCase()}</b><strong>${d.getDate()}</strong><span>${count} atendimento(s)</span></button>`}grid.innerHTML=html}else{title.textContent=fmtLong(isoDate(calendarDate));sub.textContent='Agenda do dia';grid.innerHTML=`<div class="day-view-head"><b>${calendarRows.filter(a=>a.data===isoDate(calendarDate)).length} agendamento(s)</b><span>Horários entre 08:00 e 21:00</span></div>`;selectedDate=isoDate(calendarDate)}}
+function selectCalendarDate(iso){selectedDate=iso;calendarDate=parseISO(iso);renderCalendar();renderAppointmentList()}
+function statusIcon(s){return s==='Pendente'?'🟡':s==='Confirmado'?'🟢':s==='Concluído'?'🔵':'🔴'}
+function statusClass(s){return (s||'Pendente').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,'-')}
+function renderAppointmentList(){const box=qs('#appointmentList'),title=qs('#selectedDayTitle'),sub=qs('#selectedDaySubtitle');if(!box)return;let rows=calendarRows.filter(a=>a.data===selectedDate);if(appointmentFilter==='pending')rows=rows.filter(a=>a.status==='Pendente');if(appointmentFilter==='confirmed')rows=rows.filter(a=>a.status==='Confirmado');title.textContent=`Agendamentos de ${fmtDate(selectedDate)}`;sub.textContent=fmtLong(selectedDate);if(!rows.length){box.innerHTML='<div class="empty">Nenhum agendamento para este dia.</div>';return}box.innerHTML=rows.map(a=>{const canConfirm=a.status==='Pendente',canFinish=a.status==='Confirmado';const waText=`Olá ${a.cliente}! 🌸 Lembrando do seu horário no salão em ${fmtDate(a.data)} às ${a.hora}. Serviço: ${a.servico}.`;const clientWa=a.contato?'<a class="btn small" target="_blank" rel="noopener" href="https://wa.me/'+encodeURIComponent(a.contato)+'?text='+encodeURIComponent(waText)+'">💬 Cliente</a>':'';return `<div class="appointment" data-status="${escapeHtml(a.status)}"><div class="appt-main"><div class="appt-time">${a.hora}</div><div><b>${escapeHtml(a.cliente)}</b><span>🌸 ${escapeHtml(a.servico)} · R$ ${money(a.valor)} · ${a.duracao} min</span>${a.contato?`<small>📱 ${escapeHtml(a.contato)}</small>`:''}</div></div><div class="appt-status status-${statusClass(a.status)}">${statusIcon(a.status)} ${escapeHtml(a.status)}</div><div class="actions"><button class="btn small" onclick="showCustomerHistory(${JSON.stringify(a.cliente)})">👩 Histórico</button>${clientWa}${canConfirm?`<button class="btn primary small" onclick="appointmentAction(${a.id},'confirm')">✅ Confirmar</button><button class="btn danger small" onclick="appointmentAction(${a.id},'cancel')">❌ Cancelar</button>`:''}${canFinish?`<button class="btn primary small" onclick="appointmentAction(${a.id},'complete')">💰 Recebido</button><button class="btn small" onclick="appointmentAction(${a.id},'fiado')">💳 Fiado</button><button class="btn danger small" onclick="appointmentAction(${a.id},'cancel')">❌ Cancelar</button>`:''}${!canConfirm&&!canFinish?`<span class="status ok">✔ ${escapeHtml(a.status)}</span>`:''}</div></div>`}).join('')}
 
-function setupAppointmentFilters(){
- const buttons=document.querySelectorAll('[data-appt-filter]');if(!buttons.length)return;
- buttons.forEach(b=>b.onclick=()=>{
-  buttons.forEach(x=>x.classList.remove('active'));b.classList.add('active');
-  const rows=document.querySelectorAll('#appointmentList .appointment');
-  rows.forEach(row=>{const date=row.dataset.date;const show=b.dataset.apptFilter==='all'||(b.dataset.apptFilter==='today'&&date===todayISO());row.style.display=show?'flex':'none'});
-  if(b.dataset.apptFilter==='today') selectCalendarDay(todayISO());
- });
-}
-
-let calendarMonth=new Date();calendarMonth.setDate(1);let selectedCalendarDate=todayISO();
-function isoDate(y,m,d){return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`}
-function changeCalendar(delta){calendarMonth.setMonth(calendarMonth.getMonth()+delta);renderCalendar()}
-function selectCalendarDay(date){
- selectedCalendarDate=date;
- renderCalendar();
- document.querySelectorAll('#appointmentList .appointment').forEach(row=>row.style.display=row.dataset.date===date?'flex':'none');
- const title=qs('#selectedDayTitle'),sub=qs('#selectedDaySubtitle');
- if(title){const [y,m,d]=date.split('-');title.textContent=`Agendamentos de ${d}/${m}/${y}`;}
- if(sub){const n=(window.APP?.appointments||[]).filter(a=>a.Data===date).length;sub.textContent=n?`${n} agendamento(s) neste dia.`:'Nenhum agendamento neste dia.'}
- document.querySelectorAll('[data-appt-filter]').forEach(x=>x.classList.remove('active'));
-}
-function setupProfessionalCalendar(){
- if(!qs('#calendarGrid'))return;
- renderCalendar();selectCalendarDay(selectedCalendarDate);
-}
-function renderCalendar(){
- const grid=qs('#calendarGrid'),title=qs('#calendarTitle'),subtitle=qs('#calendarSubtitle');if(!grid)return;
- const y=calendarMonth.getFullYear(),m=calendarMonth.getMonth();
- const monthName=calendarMonth.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
- if(title)title.textContent=monthName.charAt(0).toUpperCase()+monthName.slice(1);
- if(subtitle)subtitle.textContent='Toque em um dia para ver os horários';
- const first=new Date(y,m,1);let start=(first.getDay()+6)%7;const days=new Date(y,m+1,0).getDate();const prevDays=new Date(y,m,0).getDate();
- const appts=window.APP?.appointments||[];let html='';
- for(let i=0;i<start;i++){const d=prevDays-start+i+1;html+=`<div class="calendar-day muted"><span class="day-number">${d}</span></div>`}
- for(let d=1;d<=days;d++){
-  const date=isoDate(y,m,d);const list=appts.filter(a=>a.Data===date);const isToday=date===todayISO();const selected=date===selectedCalendarDate;
-  html+=`<button type="button" class="calendar-day ${isToday?'today ':''}${selected?'selected':''}" onclick="selectCalendarDay('${date}')"><span class="day-number">${d}</span>${list.length?`<span class="day-count">${list.length} ${list.length===1?'horário':'horários'}</span><i class="dot"></i>`:''}</button>`;
- }
- const total=start+days;const tail=(7-(total%7))%7;for(let d=1;d<=tail;d++)html+=`<div class="calendar-day muted"><span class="day-number">${d}</span></div>`;
- grid.innerHTML=html;
-}
+async function showCustomerHistory(name){openModal('historyModal');const box=qs('#historyContent');box.innerHTML='<div class="empty">Carregando histórico de '+escapeHtml(name)+'...</div>';try{const r=await fetch('/api/customer-history?name='+encodeURIComponent(name));const total=r.agendamentos.reduce((s,a)=>s+Number(a.valor||0),0);box.innerHTML=`<div class="history-header"><div><span class="eyebrow">HISTÓRICO DA CLIENTE</span><h2>👩 ${escapeHtml(r.cliente)}</h2></div><div class="history-total">R$ ${money(total)}<small>em agendamentos</small></div></div><div class="history-stats"><div><b>${r.agendamentos.length}</b><span>Agendamentos</span></div><div><b>${r.agendamentos.filter(a=>a.status==='Concluído').length}</b><span>Concluídos</span></div><div><b>${r.financeiro.length}</b><span>Lançamentos</span></div></div><h3>📅 Atendimentos</h3><div class="history-list">${r.agendamentos.length?r.agendamentos.map(a=>`<div class="history-item"><div><b>${fmtDate(a.data)} às ${a.hora}</b><span>${escapeHtml(a.servico)} · ${escapeHtml(a.status)}</span></div><strong>R$ ${money(a.valor)}</strong></div>`).join(''):'<div class="empty">Nenhum atendimento encontrado.</div>'}</div><h3>💸 Financeiro relacionado</h3><div class="history-list">${r.financeiro.length?r.financeiro.map(a=>`<div class="history-item"><div><b>${fmtDate(a.data)}</b><span>${escapeHtml(a.tipo)} · ${escapeHtml(a.descricao)}</span></div><strong>R$ ${money(Math.abs(a.valor))}</strong></div>`).join(''):'<div class="empty">Nenhum lançamento relacionado.</div>'}</div>`}catch(e){box.innerHTML='<div class="empty">Não foi possível carregar o histórico.</div>'}}
