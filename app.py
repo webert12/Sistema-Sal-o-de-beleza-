@@ -26,6 +26,13 @@ DB_URL = os.getenv("DB_URL", "")
 # configurado com a URL do driver psycopg (v3), usamos o driver instalado.
 DB_URL = DB_URL.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
 DB_URL = DB_URL.replace("postgres+psycopg://", "postgresql+psycopg2://", 1)
+# SQLAlchemy 2.1+ pode escolher psycopg (v3) como driver padrão
+# quando a URL vem como postgresql://. Como este projeto instala
+# psycopg2-binary, deixamos o driver explícito para evitar esse erro.
+if DB_URL.startswith("postgresql://"):
+    DB_URL = DB_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+elif DB_URL.startswith("postgres://"):
+    DB_URL = DB_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 SALT = os.getenv("SECURITY_SALT", "")
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "")
 SUPPORT_PHONE = re.sub(r"\D", "", os.getenv("SUPPORT_PHONE", ""))
