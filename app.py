@@ -22,6 +22,10 @@ from reportlab.lib import colors
 
 TZ = ZoneInfo("America/Sao_Paulo")
 DB_URL = os.getenv("DB_URL", "")
+# Compatibilidade: o projeto usa psycopg2-binary. Se o Render estiver
+# configurado com a URL do driver psycopg (v3), usamos o driver instalado.
+DB_URL = DB_URL.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+DB_URL = DB_URL.replace("postgres+psycopg://", "postgresql+psycopg2://", 1)
 SALT = os.getenv("SECURITY_SALT", "")
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "")
 SUPPORT_PHONE = re.sub(r"\D", "", os.getenv("SUPPORT_PHONE", ""))
