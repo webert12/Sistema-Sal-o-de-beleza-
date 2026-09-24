@@ -1,7 +1,8 @@
-streamlit
+Flask
+Gunicorn
 pandas
 plotly
-sqlalchemy
+SQLAlchemy
 psycopg2-binary
 reportlab
 cryptography
