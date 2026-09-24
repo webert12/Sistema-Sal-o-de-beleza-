@@ -109,9 +109,12 @@ def init_db():
         "ALTER TABLE admin_config ADD COLUMN IF NOT EXISTS url_sistema TEXT;",
         "CREATE TABLE IF NOT EXISTS usuarios (id TEXT PRIMARY KEY, senha TEXT NOT NULL, email TEXT, tipo TEXT, vencimento TEXT, status TEXT, whatsapp TEXT);",
         "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS whatsapp TEXT;",
-        "CREATE TABLE IF NOT EXISTS servicos (id SERIAL PRIMARY KEY, usuario_id TEXT NOT NULL, nome TEXT NOT NULL, preco NUMERIC NOT NULL);",
+        "CREATE TABLE IF NOT EXISTS servicos (id SERIAL PRIMARY KEY, usuario_id TEXT NOT NULL, nome TEXT NOT NULL, preco NUMERIC NOT NULL, categoria TEXT DEFAULT 'Geral', duracao_min INT DEFAULT 60);",
+        "ALTER TABLE servicos ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral';",
+        "ALTER TABLE servicos ADD COLUMN IF NOT EXISTS duracao_min INT DEFAULT 60;",
         "CREATE TABLE IF NOT EXISTS fluxo_caixa (id SERIAL PRIMARY KEY, usuario_id TEXT NOT NULL, data TEXT NOT NULL, tipo TEXT NOT NULL, descricao TEXT NOT NULL, valor NUMERIC NOT NULL);",
-        "CREATE TABLE IF NOT EXISTS agendamentos (id SERIAL PRIMARY KEY, usuario_id TEXT NOT NULL, cliente_nome TEXT NOT NULL, cliente_contato TEXT, servico_nome TEXT NOT NULL, data TEXT NOT NULL, hora TEXT NOT NULL, status TEXT DEFAULT 'Pendente', valor NUMERIC DEFAULT 0, confirmado_em TIMESTAMP, concluido_em TIMESTAMP, financeiro_id INT);",
+        "CREATE TABLE IF NOT EXISTS agendamentos (id SERIAL PRIMARY KEY, usuario_id TEXT NOT NULL, cliente_nome TEXT NOT NULL, cliente_contato TEXT, servico_nome TEXT NOT NULL, data TEXT NOT NULL, hora TEXT NOT NULL, status TEXT DEFAULT 'Pendente', valor NUMERIC DEFAULT 0, duracao_min INT DEFAULT 60, confirmado_em TIMESTAMP, concluido_em TIMESTAMP, financeiro_id INT);",
+        "ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS duracao_min INT DEFAULT 60;",
         "ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Pendente';",
         "ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS valor NUMERIC DEFAULT 0;",
         "ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS confirmado_em TIMESTAMP;",
@@ -119,7 +122,9 @@ def init_db():
         "ALTER TABLE agendamentos ADD COLUMN IF NOT EXISTS financeiro_id INT;",
         "ALTER TABLE fluxo_caixa ADD COLUMN IF NOT EXISTS appointment_id INT;",
         "UPDATE agendamentos SET status='Pendente' WHERE status IS NULL;",
+        "UPDATE servicos SET categoria=COALESCE(NULLIF(categoria, ''),'Geral'), duracao_min=CASE WHEN duracao_min IS NULL OR duracao_min<15 THEN 60 ELSE duracao_min END;",
         "UPDATE agendamentos SET valor=COALESCE((SELECT preco FROM servicos s WHERE s.usuario_id=agendamentos.usuario_id AND s.nome=agendamentos.servico_nome),0) WHERE valor IS NULL OR valor=0;",
+        "UPDATE agendamentos SET duracao_min=COALESCE((SELECT duracao_min FROM servicos s WHERE s.usuario_id=agendamentos.usuario_id AND s.nome=agendamentos.servico_nome),60) WHERE duracao_min IS NULL OR duracao_min<15;",
         "CREATE TABLE IF NOT EXISTS clientes_mensais (id SERIAL PRIMARY KEY, usuario_id TEXT NOT NULL, nome_cliente TEXT NOT NULL, telefone TEXT, servicos_feitos INT DEFAULT 0, valor_devido NUMERIC DEFAULT 0.0, status_divida TEXT DEFAULT 'Pendente');",
         "CREATE TABLE IF NOT EXISTS usuario_config (usuario_id TEXT PRIMARY KEY, meta_mensal NUMERIC DEFAULT 5000);",
         "CREATE TABLE IF NOT EXISTS login_rate (chave TEXT PRIMARY KEY, tentativas INT NOT NULL DEFAULT 0, janela_inicio TIMESTAMP NOT NULL);",
@@ -254,8 +259,24 @@ def user_valid(user):
 
 
 def get_services(user):
-    rows = db_exec("SELECT nome, preco FROM servicos WHERE usuario_id=:u ORDER BY nome", {"u": user}, True)
+    rows = db_exec("SELECT nome, preco FROM servicos WHERE usuario_id=:u ORDER BY categoria, nome", {"u": user}, True)
     return {r[0]: float(r[1]) for r in rows} if rows else dict(DEFAULT_SERVICES)
+
+
+def get_service_details(user):
+    rows = db_exec("SELECT nome, preco, categoria, duracao_min FROM servicos WHERE usuario_id=:u ORDER BY categoria, nome", {"u": user}, True)
+    if rows:
+        return {str(r[0]): {"preco": float(r[1]), "categoria": r[2] or "Geral", "duracao": int(r[3] or 60)} for r in rows}
+    categories = {
+        "Corte Feminino":"Cabelo", "Escova":"Cabelo", "Hidratação":"Cabelo", "Coloração":"Cabelo", "Progressiva":"Cabelo",
+        "Manicure":"Unhas", "Pedicure":"Unhas", "Design de Sobrancelhas":"Sobrancelhas", "Combo Manicure + Pedicure":"Combos"
+    }
+    durations = {"Corte Feminino":60,"Escova":45,"Hidratação":60,"Manicure":45,"Pedicure":45,"Design de Sobrancelhas":30,"Coloração":120,"Progressiva":180,"Combo Manicure + Pedicure":90}
+    return {name: {"preco": price, "categoria": categories.get(name,"Geral"), "duracao": durations.get(name,60)} for name,price in DEFAULT_SERVICES.items()}
+
+
+def service_duration(user, name):
+    return int(get_service_details(user).get(name, {}).get("duracao", 60))
 
 
 def get_flow(user):
@@ -276,8 +297,8 @@ def get_appointments(user, only_upcoming=False):
     if only_upcoming:
         now = datetime.now(TZ)
         params.update({"today": now.strftime("%Y-%m-%d"), "hora": now.strftime("%H:%M")})
-    rows = db_exec(f"SELECT id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor FROM agendamentos {where} ORDER BY data,hora", params, True)
-    return pd.DataFrame(rows, columns=["id", "Cliente", "Contato", "Serviço", "Data", "Horário", "Status", "Valor"])
+    rows = db_exec(f"SELECT id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor,duracao_min FROM agendamentos {where} ORDER BY data,hora", params, True)
+    return pd.DataFrame(rows, columns=["id", "Cliente", "Contato", "Serviço", "Data", "Horário", "Status", "Valor", "Duração"])
 
 
 def get_monthly(user):
@@ -341,6 +362,10 @@ def calc_dashboard(user):
     clients.update(appts.Cliente.dropna() if not appts.empty else [])
     goal = get_goal(user)
     progress = min(100.0, (receita_mes / goal * 100) if goal > 0 else 0)
+    completed_month = appts[(appts["Status"] == "Concluído") & (appts["Data"].astype(str).str[:7] == today.strftime("%Y-%m"))] if not appts.empty else appts
+    cancel_month = int((appts["Status"] == "Cancelado").sum()) if not appts.empty else 0
+    completed_count = int(len(completed_month)) if not completed_month.empty else 0
+    pending_debt = float(clean[clean.Tipo == "Pendência"].Valor.sum()) if not clean.empty else 0
     return {
         "receita_dia": receita_dia, "receita_mes": receita_mes, "receita_ano": receita_ano, "lucro": lucro,
         "pct_receita": percent_change(receita_mes, receita_prev), "pct_lucro": percent_change(lucro, lucro_prev),
@@ -348,6 +373,7 @@ def calc_dashboard(user):
         "clientes": len(clients), "agendamentos_hoje": len(appt_today), "today": today.strftime("%d/%m"),
         "mes_passado": receita_prev, "goal": goal, "goal_progress": progress,
         "agendamentos_pendentes": pending_appts, "agendamentos_confirmados": confirmed_appts,
+        "atendimentos_mes": completed_count, "cancelados": cancel_month, "fiado_pendente": pending_debt,
     }
 
 
@@ -371,13 +397,13 @@ def backup_json(user):
         return [dict(zip(columns, r)) for r in db_exec(f"SELECT {','.join(columns)} FROM {table} WHERE usuario_id=:u", {"u": user}, True)]
     payload = {
         "sistema": "Fio&Caixa",
-        "versao": "2.0",
+        "versao": "3.0",
         "usuario_dono": user,
         "data_geracao": datetime.now(TZ).isoformat(),
         "meta_mensal": get_goal(user),
-        "servicos": rows("servicos", ["id", "nome", "preco"]),
+        "servicos": rows("servicos", ["id", "nome", "preco", "categoria", "duracao_min"]),
         "historico_financeiro": rows("fluxo_caixa", ["id", "data", "tipo", "descricao", "valor"]),
-        "agendamentos": rows("agendamentos", ["id", "cliente_nome", "cliente_contato", "servico_nome", "data", "hora", "status", "valor"]),
+        "agendamentos": rows("agendamentos", ["id", "cliente_nome", "cliente_contato", "servico_nome", "data", "hora", "status", "valor", "duracao_min"]),
         "clientes_mensais": rows("clientes_mensais", ["id", "nome_cliente", "telefone", "servicos_feitos", "valor_devido", "status_divida"]),
     }
     def ser(o):
@@ -534,7 +560,7 @@ def dashboard():
     pending_credits = [r for r in flow_records if r.get("Tipo") == "Pendência"]
     return render_template(
         "dashboard.html", user=user, name=user.replace("_", " ").replace("-", " ").title(),
-        services=get_services(user), dash=d, appointments=appts.to_dict("records"),
+        services=get_services(user), service_details=get_service_details(user), dash=d, appointments=appts.to_dict("records"),
         monthly=get_monthly(user).to_dict("records"), flow=flow_records, pending_credits=pending_credits,
         chart=daily_chart(user), booking_link=booking_url(user),
     )
@@ -567,12 +593,15 @@ def api_services():
         name = str(data.get("name", "")).strip()[:100]
         try: price = float(data.get("price", 0) or 0)
         except (TypeError, ValueError): return jsonify({"error": "Preço inválido"}), 400
+        try: duration = int(data.get("duration", 60) or 60)
+        except (TypeError, ValueError): return jsonify({"error": "Duração inválida"}), 400
+        category = str(data.get("category", "Geral")).strip()[:60] or "Geral"
         old = str(data.get("old", "")).strip()
-        if not name or price < 0: return jsonify({"error": "Informe nome e preço válidos"}), 400
+        if not name or price < 0 or duration < 15 or duration > 480 or duration % 15 != 0: return jsonify({"error": "Informe nome, preço e duração válidos (15 a 480 min, em blocos de 15)."}), 400
         if old and old != "__new__":
-            db_exec("UPDATE servicos SET nome=:n,preco=:p WHERE usuario_id=:u AND nome=:o", {"n": name, "p": price, "u": user, "o": old})
+            db_exec("UPDATE servicos SET nome=:n,preco=:p,categoria=:c,duracao_min=:d WHERE usuario_id=:u AND nome=:o", {"n": name, "p": price, "c": category, "d": duration, "u": user, "o": old})
         else:
-            db_exec("INSERT INTO servicos(usuario_id,nome,preco) VALUES(:u,:n,:p)", {"u": user, "n": name, "p": price})
+            db_exec("INSERT INTO servicos(usuario_id,nome,preco,categoria,duracao_min) VALUES(:u,:n,:p,:c,:d)", {"u": user, "n": name, "p": price, "c": category, "d": duration})
     else:
         name = request.args.get("name", "")
         db_exec("DELETE FROM servicos WHERE usuario_id=:u AND nome=:n", {"u": user, "n": name})
@@ -634,6 +663,29 @@ def api_monthly():
     return jsonify({"ok": True})
 
 
+def booked_appointments_for_day(user, date):
+    return db_exec("SELECT id,hora,duracao_min,status FROM agendamentos WHERE usuario_id=:u AND data=:d AND status NOT IN ('Cancelado')", {"u": user, "d": date}, True)
+
+
+def slot_is_available(user, date, hour, duration, ignore_id=None, rows=None):
+    start = datetime.strptime(f"{date} {hour}", "%Y-%m-%d %H:%M")
+    end = start + timedelta(minutes=int(duration))
+    rows = rows if rows is not None else booked_appointments_for_day(user, date)
+    for aid, booked_hour, booked_duration, status in rows:
+        if ignore_id and int(aid) == int(ignore_id):
+            continue
+        bstart = datetime.strptime(f"{date} {booked_hour}", "%Y-%m-%d %H:%M")
+        bend = bstart + timedelta(minutes=int(booked_duration or 60))
+        if start < bend and bstart < end:
+            return False
+    return end <= datetime.strptime(f"{date} 21:00", "%Y-%m-%d %H:%M")
+
+
+def available_slots(user, date, duration):
+    rows = booked_appointments_for_day(user, date)
+    return [h for h in ALLOWED_HOURS if slot_is_available(user, date, h, duration, rows=rows)]
+
+
 @app.route("/api/appointments", methods=["POST"])
 def create_appointment():
     if not require_login() or require_admin(): return jsonify({"error": "unauthorized"}), 401
@@ -643,16 +695,17 @@ def create_appointment():
     service = str(d.get("servico", "")).strip()
     date = str(d.get("data", "")); hour = str(d.get("hora", ""))
     services = get_services(user)
+    duration = service_duration(user, service)
     dt = valid_date_time(date, hour)
-    if not name or service not in services or not dt or dt <= datetime.now(TZ):
-        return jsonify({"error": "Dados do agendamento inválidos"}), 400
+    if not name or service not in services or not dt or dt <= datetime.now(TZ) or not slot_is_available(user, date, hour, duration):
+        return jsonify({"error": "Dados do agendamento inválidos ou horário indisponível"}), 400
     try:
         with engine.begin() as conn:
-            lock_key = int(hashlib.sha256(f"{user}|{date}|{hour}".encode()).hexdigest()[:15], 16) % (2**63 - 1)
+            lock_key = int(hashlib.sha256(f"{user}|{date}".encode()).hexdigest()[:15], 16) % (2**63 - 1)
             conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
             exists = conn.execute(text("SELECT 1 FROM agendamentos WHERE usuario_id=:u AND data=:d AND hora=:h"), {"u": user, "d": date, "h": hour}).fetchone()
             if exists: return jsonify({"error": "Esse horário já está ocupado"}), 409
-            conn.execute(text("INSERT INTO agendamentos(usuario_id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor) VALUES(:u,:n,:c,:s,:d,:h,'Pendente',:v)"), {"u": user, "n": name, "c": phone, "s": service, "d": date, "h": hour, "v": float(services[service])})
+            conn.execute(text("INSERT INTO agendamentos(usuario_id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor,duracao_min) VALUES(:u,:n,:c,:s,:d,:h,'Pendente',:v,:dur)"), {"u": user, "n": name, "c": phone, "s": service, "d": date, "h": hour, "v": float(services[service]), "dur": duration})
     except Exception:
         return jsonify({"error": "Não foi possível criar o agendamento"}), 500
     return jsonify({"ok": True})
@@ -663,12 +716,13 @@ def appointment_action(aid):
     if not require_login() or require_admin():
         return jsonify({"error": "unauthorized"}), 401
     user = current_user()
-    row = db_exec("SELECT cliente_nome,servico_nome,cliente_contato,data,hora,status,valor FROM agendamentos WHERE id=:id AND usuario_id=:u", {"id": aid, "u": user}, True)
+    row = db_exec("SELECT cliente_nome,servico_nome,cliente_contato,data,hora,status,valor,duracao_min FROM agendamentos WHERE id=:id AND usuario_id=:u", {"id": aid, "u": user}, True)
     if not row:
         return jsonify({"error": "Agendamento não encontrado"}), 404
-    client, service, phone, date, hour, status, stored_value = row[0]
+    client, service, phone, date, hour, status, stored_value, stored_duration = row[0]
     status = status or "Pendente"
     price = float(stored_value or get_services(user).get(service, 0))
+    duration = int(stored_duration or service_duration(user, service))
     if request.method == "DELETE":
         db_exec("UPDATE agendamentos SET status='Cancelado' WHERE id=:id AND usuario_id=:u", {"id": aid, "u": user})
         return jsonify({"ok": True, "status": "Cancelado"})
@@ -709,8 +763,9 @@ def booking_slots():
         return jsonify([])
     today = datetime.now(TZ).date()
     if day < today or day > today + timedelta(days=90): return jsonify([])
-    booked = {r[0] for r in db_exec("SELECT hora FROM agendamentos WHERE usuario_id=:u AND data=:d", {"u": salao, "d": date}, True)}
-    slots = [h for h in ALLOWED_HOURS if h not in booked]
+    service = request.args.get("service", "").strip()
+    duration = service_duration(salao, service) if service else 60
+    slots = available_slots(salao, date, duration)
     if day == today:
         now_hm = datetime.now(TZ).strftime("%H:%M")
         slots = [h for h in slots if h > now_hm]
@@ -728,6 +783,7 @@ def booking():
         name = str(request.form.get("nome", "")).strip()[:100]
         phone = normalize_phone(request.form.get("telefone", ""))[:20]
         service = request.form.get("servico", ""); date = request.form.get("data", ""); hour = request.form.get("hora", "")
+        duration = service_duration(salao, service)
         dt = valid_date_time(date, hour)
         if not name or len(phone) < 8 or service not in services or not dt:
             flash("Preencha os dados corretamente.", "error")
@@ -736,13 +792,13 @@ def booking():
         else:
             try:
                 with engine.begin() as conn:
-                    lock_key = int(hashlib.sha256(f"{salao}|{date}|{hour}".encode()).hexdigest()[:15], 16) % (2**63 - 1)
+                    lock_key = int(hashlib.sha256(f"{salao}|{date}".encode()).hexdigest()[:15], 16) % (2**63 - 1)
                     conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
-                    exists = conn.execute(text("SELECT 1 FROM agendamentos WHERE usuario_id=:u AND data=:d AND hora=:h"), {"u": salao, "d": date, "h": hour}).fetchone()
-                    if exists:
+                    exists = conn.execute(text("SELECT 1 FROM agendamentos WHERE usuario_id=:u AND data=:d AND hora=:h AND status <> 'Cancelado'"), {"u": salao, "d": date, "h": hour}).fetchone()
+                    if exists or not slot_is_available(salao, date, hour, duration):
                         flash("Esse horário acabou de ser ocupado. Escolha outro.", "error")
                     else:
-                        conn.execute(text("INSERT INTO agendamentos(usuario_id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor) VALUES(:u,:n,:c,:s,:d,:h,'Pendente',:v)"), {"u": salao, "n": name, "c": phone, "s": service, "d": date, "h": hour, "v": float(services[service])})
+                        conn.execute(text("INSERT INTO agendamentos(usuario_id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor,duracao_min) VALUES(:u,:n,:c,:s,:d,:h,'Pendente',:v,:dur)"), {"u": salao, "n": name, "c": phone, "s": service, "d": date, "h": hour, "v": float(services[service]), "dur": duration})
                         price = float(services[service])
                         date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%d/%m/%Y")
                         price_display = f"R$ {price:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -752,7 +808,7 @@ def booking():
                             f"👤 *Cliente:* {name}\n"
                             f"📅 *Data:* {date_display}\n"
                             f"⏰ *Horário:* {hour}\n"
-                            f"💈 *Serviço(s):* {service}\n"
+                            f"🌸 *Serviço:* {service}\n"
                             f"💵 *Valor Total:* {price_display}"
                         )
                         success = {
@@ -763,7 +819,31 @@ def booking():
                         }
             except Exception:
                 flash("Não foi possível reservar este horário agora. Tente novamente.", "error")
-    return render_template("booking.html", unavailable=False, salao=salao, name=salao.replace("_", " ").title(), services=services, success=success, today=datetime.now(TZ).date().isoformat())
+    return render_template("booking.html", unavailable=False, salao=salao, name=salao.replace("_", " ").title(), services=services, service_details=get_service_details(salao), success=success, today=datetime.now(TZ).date().isoformat())
+
+
+@app.route("/api/customer-history")
+def customer_history():
+    if not require_login() or require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    user = current_user()
+    name = str(request.args.get("name", "")).strip()[:100]
+    if not name:
+        return jsonify({"error": "Cliente não informado"}), 400
+    rows = db_exec("SELECT id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor FROM agendamentos WHERE usuario_id=:u AND lower(cliente_nome)=lower(:n) ORDER BY data DESC,hora DESC LIMIT 50", {"u": user, "n": name}, True)
+    flow = db_exec("SELECT data,tipo,descricao,valor FROM fluxo_caixa WHERE usuario_id=:u AND lower(descricao) LIKE :needle ORDER BY data DESC,id DESC LIMIT 50", {"u": user, "needle": f"%{name.lower()}%"}, True)
+    return jsonify({"cliente": name, "agendamentos": [{"id":r[0],"nome":r[1],"contato":r[2],"servico":r[3],"data":r[4],"hora":r[5],"status":r[6],"valor":float(r[7] or 0)} for r in rows], "financeiro": [{"data":str(r[0]),"tipo":r[1],"descricao":r[2],"valor":float(r[3] or 0)} for r in flow]})
+
+
+@app.route("/api/agenda")
+def agenda_api():
+    if not require_login() or require_admin():
+        return jsonify({"error": "unauthorized"}), 401
+    user=current_user()
+    start=str(request.args.get("start", "")); end=str(request.args.get("end", ""))
+    if not start or not end: return jsonify({"error":"Período inválido"}),400
+    rows=db_exec("SELECT id,cliente_nome,cliente_contato,servico_nome,data,hora,status,valor,duracao_min FROM agendamentos WHERE usuario_id=:u AND data BETWEEN :s AND :e ORDER BY data,hora", {"u":user,"s":start,"e":end}, True)
+    return jsonify([{"id":r[0],"cliente":r[1],"contato":r[2],"servico":r[3],"data":r[4],"hora":r[5],"status":r[6] or "Pendente","valor":float(r[7] or 0),"duracao":int(r[8] or 60)} for r in rows])
 
 
 @app.route("/backup.json")
